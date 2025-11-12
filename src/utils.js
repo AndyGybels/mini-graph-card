@@ -28,33 +28,34 @@ const log = (message) => {
 };
 
 /**
- * Subscribe to state changes for specific entity
+ * Subscribe to state changes for all entities and filter for specific ones
  * @param {object} hass - Home Assistant connection object
- * @param {string} entityId - Entity ID to subscribe to
- * @param {function} callback - Callback function to handle state changes
+ * @param {Array<string>} entityIds - Entity IDs to monitor
+ * @param {function} callback - Callback function to handle state changes (entityId, newState)
  * @returns {Promise<function>} Unsubscribe function
  */
-const subscribeEntity = async (hass, entityId, callback) => {
+const subscribeEvents = async (hass, entityIds, callback) => {
   if (!hass.connection) {
     log('No WebSocket connection available');
     return null;
   }
 
   try {
-    return await hass.connection.subscribeMessage(
-      (message) => {
-        if (message.data && message.data.new_state) {
-          callback(message.data.new_state);
+    const entityIdSet = new Set(entityIds);
+
+    return await hass.connection.subscribeEvents(
+      (event) => {
+        if (event.data && event.data.new_state) {
+          const entityId = event.data.entity_id;
+          if (entityIdSet.has(entityId)) {
+            callback(entityId, event.data.new_state);
+          }
         }
       },
-      {
-        type: 'subscribe_events',
-        event_type: 'state_changed',
-        entity_id: entityId,
-      },
+      'state_changed',
     );
   } catch (err) {
-    log(`Failed to subscribe to entity ${entityId}: ${err}`);
+    log(`Failed to subscribe to state_changed events: ${err}`);
     return null;
   }
 };
@@ -74,7 +75,6 @@ const fetchHistoryWebSocket = async (
   entityId,
   start,
   end,
-  skipInitialState,
   withAttributes,
 ) => {
   if (!hass.connection) {
@@ -96,11 +96,30 @@ const fetchHistoryWebSocket = async (
       params.end_time = end.toISOString();
     }
 
-    if (skipInitialState) {
-      params.skip_initial_state = true;
+    const result = await hass.connection.sendMessagePromise(params);
+
+    // Transform WebSocket response to match REST API format
+    // WebSocket returns: {"entity_id": [{s: "state", lu: timestamp}, ...]}
+    // REST API returns: [[{state: "state", last_changed: "ISO string"}, ...]]
+    if (result && typeof result === 'object') {
+      const entityData = result[entityId];
+      if (entityData && Array.isArray(entityData)) {
+        // Convert from WebSocket format to REST API format
+        const transformed = entityData.map(item => ({
+          state: item.s,
+          // WebSocket uses lu (last_updated) as Unix timestamp
+          // Convert to ISO string for both last_changed and last_updated
+          last_changed: new Date(item.lu * 1000).toISOString(),
+          last_updated: new Date(item.lu * 1000).toISOString(),
+          // Attributes might be present as 'a', default to empty object
+          attributes: item.a || {},
+        }));
+        return [transformed];
+      }
+      // If entity data is not found, return empty array in expected format
+      return [[]];
     }
 
-    const result = await hass.connection.sendMessagePromise(params);
     return result;
   } catch (err) {
     log(`Failed to fetch history via WebSocket for ${entityId}: ${err}`);
@@ -125,7 +144,7 @@ export {
   getMin, getAvg, getMax, getTime, getMilli, compress, decompress, log,
   getFirstDefinedItem,
   compareArray,
-  subscribeEntity,
+  subscribeEvents,
   fetchHistoryWebSocket,
   getStateFromStore,
 };

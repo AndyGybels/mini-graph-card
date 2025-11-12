@@ -14,7 +14,6 @@ import {
   ICONS,
   UPDATE_PROPS,
   X, Y, V,
-  ONE_HOUR,
 } from './const';
 import {
   getMin, getAvg, getMax,
@@ -23,7 +22,7 @@ import {
   getFirstDefinedItem,
   compareArray,
   log,
-  subscribeEntity,
+  subscribeEvents,
   fetchHistoryWebSocket,
 } from './utils';
 
@@ -52,6 +51,7 @@ class MiniGraphCard extends LitElement {
     this._md5Config = undefined;
     this._subscriptions = [];
     this._useWebSocket = true;
+    this._subscriptionsSetup = false;
   }
 
   static get styles() {
@@ -59,14 +59,14 @@ class MiniGraphCard extends LitElement {
   }
 
   set hass(hass) {
-    const oldHass = this._hass;
     this._hass = hass;
     let updated = false;
     const queue = [];
 
     // Check if we need to set up WebSocket subscriptions
-    if (hass && hass.connection && (!oldHass || !oldHass.connection)) {
-      // Connection became available, set up subscriptions
+    // Only set up once when connection becomes available and we have a config
+    if (hass && hass.connection && this.config
+      && this.config.entities && !this._subscriptionsSetup) {
       this.setupWebSocketSubscriptions();
     }
 
@@ -82,14 +82,10 @@ class MiniGraphCard extends LitElement {
     if (updated) {
       this.stateChanged = true;
       this.entity = [...this.entity];
-      if (!this.config.update_interval && !this.updating) {
-        setTimeout(() => {
-          this.updateQueue = [...queue, ...this.updateQueue];
-          this.updateData();
-        }, this.initial ? 0 : 1000);
-      } else {
+      setTimeout(() => {
         this.updateQueue = [...queue, ...this.updateQueue];
-      }
+        this.updateData();
+      }, this.initial ? 0 : 1000);
     }
   }
 
@@ -141,23 +137,9 @@ class MiniGraphCard extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    if (this.config.update_interval) {
-      window.requestAnimationFrame(() => {
-        this.updateOnInterval();
-      });
-      this.interval = setInterval(
-        () => this.updateOnInterval(),
-        this.config.update_interval * 1000,
-      );
-    }
-    // Set up WebSocket subscriptions for real-time updates
-    this.setupWebSocketSubscriptions();
   }
 
   disconnectedCallback() {
-    if (this.interval) {
-      clearInterval(this.interval);
-    }
     // Clean up WebSocket subscriptions
     this.cleanupWebSocketSubscriptions();
     super.disconnectedCallback();
@@ -168,40 +150,38 @@ class MiniGraphCard extends LitElement {
       return;
     }
 
-    // Clean up existing subscriptions first
-    this.cleanupWebSocketSubscriptions();
-
-    // Subscribe to each entity for real-time state changes
-    const subscriptionPromises = this.config.entities.map(async (entityConfig, index) => {
-      try {
-        const unsubscribe = await subscribeEntity(
-          this._hass,
-          entityConfig.entity,
-          (newState) => {
-            // Update entity state when we receive updates via WebSocket
-            if (newState && this.entity[index] !== newState) {
-              this.entity[index] = newState;
-              this.updateQueue.push(`${newState.entity_id}-${index}`);
-              this.stateChanged = true;
-              this.entity = [...this.entity];
-
-              // Trigger update if not already updating
-              if (!this.config.update_interval && !this.updating) {
-                setTimeout(() => this.updateData(), 100);
-              }
-            }
-          },
-        );
-
-        if (unsubscribe) {
-          this._subscriptions.push(unsubscribe);
-        }
-      } catch (err) {
-        log(`Failed to subscribe to ${entityConfig.entity}: ${err}`);
-      }
+    // Create a map of entity ID to index for quick lookup
+    const entityMap = new Map();
+    this.config.entities.forEach((entityConfig, index) => {
+      entityMap.set(entityConfig.entity, index);
     });
 
-    await Promise.all(subscriptionPromises);
+    // Subscribe once to all state_changed events
+    try {
+      const entityIds = this.config.entities.map(e => e.entity);
+      const unsubscribe = await subscribeEvents(
+        this._hass,
+        entityIds,
+        (entityId, newState) => {
+          const index = entityMap.get(entityId);
+          if (index !== undefined && newState && this.entity[index] !== newState) {
+            this.entity[index] = newState;
+            this.updateQueue.push(`${newState.entity_id}-${index}`);
+            this.stateChanged = true;
+            this.entity = [...this.entity];
+
+            log('state_changed', newState);
+          }
+        },
+      );
+
+      if (unsubscribe) {
+        this._subscriptions.push(unsubscribe);
+      }
+      this._subscriptionsSetup = true;
+    } catch (err) {
+      log(`Failed to subscribe to state changes: ${err}`);
+    }
   }
 
   cleanupWebSocketSubscriptions() {
@@ -218,6 +198,7 @@ class MiniGraphCard extends LitElement {
       });
       this._subscriptions = [];
     }
+    this._subscriptionsSetup = false;
   }
 
   shouldUpdate(changedProps) {
@@ -835,13 +816,6 @@ class MiniGraphCard extends LitElement {
     return num.toString();
   }
 
-  updateOnInterval() {
-    if (this.stateChanged && !this.updating) {
-      this.stateChanged = false;
-      this.updateData();
-    }
-  }
-
   async updateData({ config } = this) {
     this.updating = true;
 
@@ -892,7 +866,6 @@ class MiniGraphCard extends LitElement {
       this.line = [...this.line];
     }
     this.updating = false;
-    this.setNextUpdate();
   }
 
   getBoundary(type, series, configVal, fallback) {
@@ -1089,7 +1062,6 @@ class MiniGraphCard extends LitElement {
           entityId,
           start,
           end,
-          skipInitialState,
           withAttributes,
         );
         if (wsResult) {
@@ -1153,16 +1125,6 @@ class MiniGraphCard extends LitElement {
         break;
     }
     return date;
-  }
-
-  setNextUpdate() {
-    if (!this.config.update_interval) {
-      const interval = 1 / this.config.points_per_hour;
-      clearInterval(this.interval);
-      this.interval = setInterval(() => {
-        if (!this.updating) this.updateData();
-      }, interval * ONE_HOUR);
-    }
   }
 
   getCardSize() {
