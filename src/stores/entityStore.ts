@@ -1,63 +1,91 @@
+import { LovelaceCardConfig } from "home-assistant-frontend-types";
 import { HassEntity, StateChangedEvent } from "home-assistant-js-websocket";
+import SparkMD5 from "spark-md5";
+import buildConfig from "~/buildConfig";
+import { mapToEntityIds } from "~/common/entity/mapper";
 import { HistoryStates } from "~/data/history";
 import { MiniGraphCardConfig, MiniGraphCardHomeAssistant } from "~/types";
+
+type ConfigCallback = (entityId: string) => void;
 
 export class EntityStore {
   private hass: MiniGraphCardHomeAssistant;
 
-  private subscribers = new Map<string, Set<() => void>>();
+  // configHash → Set<callbacks>
+  private configSubscribers = new Map<string, Set<ConfigCallback>>();
+
+  private configMap = new Map<string, LovelaceCardConfig>();
+
+  // entityId → Set<configHashes>
+  private entityToConfigs = new Map<string, Set<string>>();
+
+  // entityId → HassEntity (shared across configs)
   private states = new Map<string, HassEntity>();
-  private histories = new Map<string, HistoryStates[0]>();
 
+  // configHash → entityId → history[]
+  private histories = new Map<string, Map<string, HistoryStates[0]>>();
+
+  // (configHash + entityId) → loading promise
   private historyLoading = new Map<string, Promise<void>>();
-  private interestCount = new Map<string, number>();
 
-  private unsub?: () => void;
+  private unsubWs?: () => void;
 
   constructor(hass: MiniGraphCardHomeAssistant) {
     this.hass = hass;
   }
 
-  async loadInitial(entityIds: string[]) {
-    for (const id of entityIds) {
-      this.states.set(id, this.hass.states[id]);
-    }
-  }
+  // -------------------------------------------------------------------
+  // WebSocket subscription
+  // -------------------------------------------------------------------
+  private async ensureWs() {
+    if (this.unsubWs) return;
 
-  private async ensureWsSubscription() {
-    if (this.unsub) return;
-
-    this.unsub = await this.hass.connection.subscribeEvents<StateChangedEvent>(
-      (ev) => {
-        const id = ev.data.entity_id;
+    this.unsubWs =
+      await this.hass.connection.subscribeEvents<StateChangedEvent>((ev) => {
+        const entityId = ev.data.entity_id;
         const newState = ev.data.new_state;
         if (!newState) return;
 
-        if (this.interestCount.has(id)) {
-          this.states.set(id, newState);
+        if (!this.entityToConfigs.has(entityId)) return;
 
-          const listeners = this.subscribers.get(id);
-          if (listeners) {
-            for (const cb of listeners) cb();
-          }
+        // Update shared state
+        this.states.set(entityId, newState);
+
+        // Notify all configs that care about this entity
+        for (const configHash of this.entityToConfigs.get(entityId)!) {
+          const callbacks = this.configSubscribers.get(configHash);
+          if (!callbacks) continue;
+
+          for (const cb of callbacks) cb(entityId);
         }
-      },
-      "state_changed"
-    );
+      }, "state_changed");
   }
 
-  private disableWsIfNeeded() {
-    if (this.interestCount.size === 0 && this.unsub) {
-      this.unsub();
-      this.unsub = undefined;
+  private cleanupWs() {
+    if (this.entityToConfigs.size === 0 && this.unsubWs) {
+      this.unsubWs();
+      this.unsubWs = undefined;
     }
   }
 
-  private async fetchHistory(entityId: string, hours = 1) {
-    if (this.histories.has(entityId)) return;
-    if (this.historyLoading.has(entityId)) {
-      return this.historyLoading.get(entityId);
+  // -------------------------------------------------------------------
+  // History loading (per config + per entity)
+  // -------------------------------------------------------------------
+  private async fetchHistory(
+    configHash: string,
+    entityId: string,
+    hours: number
+  ) {
+    // Create config-level history bucket
+    if (!this.histories.has(configHash)) {
+      this.histories.set(configHash, new Map());
     }
+
+    // Prevent duplicate loads
+    const key = `${configHash}:${entityId}`;
+    if (this.historyLoading.has(key)) return this.historyLoading.get(key);
+
+    if (this.histories.get(configHash)!.has(entityId)) return;
 
     const end = new Date();
     const start = new Date(end.getTime() - hours * 3600 * 1000);
@@ -74,68 +102,101 @@ export class EntityStore {
             entity_ids: [entityId],
           });
 
-        this.histories.set(entityId, result?.[0] ?? []);
-        const listeners = this.subscribers.get(entityId);
-        listeners?.forEach((cb) => cb());
+        const history = result?.[0] ?? [];
+
+        this.histories.get(configHash)!.set(entityId, history);
+
+        // Notify config that its history is ready
+        const callbacks = this.configSubscribers.get(configHash);
+        callbacks?.forEach((cb) => cb(entityId));
       } finally {
-        this.historyLoading.delete(entityId);
+        this.historyLoading.delete(key);
       }
     })();
 
-    this.historyLoading.set(entityId, p);
+    this.historyLoading.set(key, p);
     return p;
   }
 
-  async subscribe(
-    config: MiniGraphCardConfig,
-    entityId: string,
-    callback: () => void
-  ) {
-    this.interestCount.set(
-      entityId,
-      (this.interestCount.get(entityId) ?? 0) + 1
-    );
+  // -------------------------------------------------------------------
+  // Subscription API
+  // -------------------------------------------------------------------
+  async subscribe(config: MiniGraphCardConfig, callback: ConfigCallback) {
+    const configHash = SparkMD5.hash(JSON.stringify(config));
+    const entities = mapToEntityIds(config.entities || []);
 
-    if (!this.subscribers.has(entityId)) {
-      this.subscribers.set(entityId, new Set());
-      console.log("subscribed to: ", entityId);
+    await this.ensureWs();
+
+    // Register config subscriber
+    if (!this.configSubscribers.has(configHash)) {
+      this.configSubscribers.set(configHash, new Set());
+      this.configMap.set(configHash, buildConfig(config));
     }
-    this.subscribers.get(entityId)!.add(callback);
 
-    this.states.set(entityId, this.hass.states[entityId]);
+    this.configSubscribers.get(configHash)!.add(callback);
 
-    await this.ensureWsSubscription();
-
-    this.fetchHistory(entityId, config.hours_to_show);
-
-    callback();
-
-    return () => {
-      const set = this.subscribers.get(entityId);
-      set?.delete(callback);
-
-      const count = (this.interestCount.get(entityId) ?? 1) - 1;
-
-      if (count <= 0) {
-        this.interestCount.delete(entityId);
-        this.subscribers.delete(entityId);
-        this.states.delete(entityId);
-        this.histories.delete(entityId);
-      } else {
-        this.interestCount.set(entityId, count);
+    // Register entity → config relationship
+    for (const entityId of entities) {
+      if (!this.entityToConfigs.has(entityId)) {
+        this.entityToConfigs.set(entityId, new Set());
       }
+      this.entityToConfigs.get(entityId)!.add(configHash);
 
-      this.disableWsIfNeeded();
+      // update initial state
+      this.states.set(entityId, this.hass.states[entityId]);
+
+      // load history per config-level
+      this.fetchHistory(configHash, entityId, config.hours_to_show ?? 1);
+    }
+
+    // initial callback (per entity)
+    for (const entityId of entities) callback(entityId);
+
+    // Unsubscribe function
+    return {
+      configId: configHash,
+      unsubscribe: () => {
+        // Remove config from entityToConfigs
+        for (const entityId of entities) {
+          const cfgs = this.entityToConfigs.get(entityId);
+          if (!cfgs) continue;
+
+          cfgs.delete(configHash);
+          if (cfgs.size === 0) {
+            this.entityToConfigs.delete(entityId);
+            this.states.delete(entityId);
+          }
+        }
+
+        // Remove the config subscriber
+        const subs = this.configSubscribers.get(configHash);
+        subs?.delete(callback);
+
+        if (subs?.size === 0) {
+          this.configSubscribers.delete(configHash);
+          this.histories.delete(configHash);
+        }
+
+        this.cleanupWs();
+      },
     };
   }
 
-  getState(entityId: string) {
-    const state = this.states.get(entityId) ?? this.hass.states[entityId];
-    if (!state) return undefined;
+  // -------------------------------------------------------------------
+  // Per-config + per-entity state + history lookup
+  // -------------------------------------------------------------------
+  getState(configId: string, entityId: string) {
+    const haState = this.states.get(entityId) ?? this.hass.states[entityId];
+
+    const history = this.histories.get(configId)?.get(entityId) ?? [];
 
     return {
-      ...state,
-      history: this.histories.get(entityId) ?? [],
+      ...haState,
+      history,
     };
+  }
+
+  getConfig(configId: string) {
+    return this.configMap.get(configId);
   }
 }

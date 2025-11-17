@@ -1,16 +1,14 @@
-import { HomeAssistant } from "home-assistant-frontend-types";
 import { html, LitElement } from "lit";
 import {
   MiniGraphCardConfig,
   MiniGraphCardHomeAssistant,
   SubscriptionUnsubscribe,
 } from "./types";
-import { subscribeEvents } from "./data/history";
 import { mapToEntityIds } from "./common/entity/mapper";
-import { StateChangedEvent } from "home-assistant-js-websocket";
 import { provide } from "@lit/context";
 import { entityStoreContext } from "./stores/entityStoreContext";
 import { EntityStore } from "./stores/entityStore";
+import SparkMD5 from "spark-md5";
 
 // import { LitElement, html, svg } from "lit-element";
 // import localForage from "localforage/src/localforage";
@@ -1314,6 +1312,7 @@ import { EntityStore } from "./stores/entityStore";
 class MiniGraphCard extends LitElement {
   private _hass?: MiniGraphCardHomeAssistant;
   private _config?: MiniGraphCardConfig;
+  private _id?: string;
   private _subscriptions: SubscriptionUnsubscribe[] = [];
 
   @provide({ context: entityStoreContext })
@@ -1330,7 +1329,7 @@ class MiniGraphCard extends LitElement {
   }
 
   setConfig(config: MiniGraphCardConfig) {
-    console.log(config);
+    console.log("config:", config);
     this._config = config;
   }
 
@@ -1341,30 +1340,55 @@ class MiniGraphCard extends LitElement {
       throw new Error("Something went wrong");
     }
 
-    const entityIds = mapToEntityIds(this._config?.entities ?? []);
-
-    entityIds.map((id) =>
-      this.entityStore.subscribe(this._config!, id, () =>
-        this.onEntityStateChange()
-      )
+    const subscribeResult = await this.entityStore.subscribe(
+      this._config!,
+      (e) => this.onEntityStateChange(e)
     );
+
+    this._id = subscribeResult.configId;
   }
 
-  onEntityStateChange() {
-    console.log("event fired");
+  onEntityStateChange(entityId: string) {
+    const configHash = SparkMD5.hash(JSON.stringify(this._config));
+
+    const newState = this.entityStore.getState(configHash, entityId);
+    console.log("newState", newState);
+    this.requestUpdate();
   }
 
   render() {
     console.log("render");
     const entityIds = mapToEntityIds(this._config?.entities ?? []);
 
-    const s = this.entityStore.getState(entityIds[0]);
+    const configHash = SparkMD5.hash(JSON.stringify(this._config));
 
-    if (s)
+    const entity = this.entityStore.getState(configHash, entityIds[1]);
+    const config = this.entityStore.getConfig(configHash)!;
+
+    console.log("config", config);
+
+    if (entity)
       return html`
-        Now: ${s.state}<br />
-        History: ${s.history.length} points
+        <ha-card
+          class="flex"
+          ?group=${config.group}
+          ?fill=${config.show.graph && config.show.fill}
+          ?points=${config.show.points === "hover"}
+          ?labels=${config.show.labels === "hover"}
+          ?labels-secondary=${config.show.labels_secondary === "hover"}
+          ?gradient=${config.color_thresholds.length > 0}
+          ?hover=${config.tap_action.action !== "none"}
+          style="font-size: ${config.font_size}px;"
+          @click=${(e) =>
+            this.handlePopup(e, config.tap_action.entity || entity)}
+        >
+          Now: ${entity.state}<br />
+          History: ${entity.history.length} points
+        </ha-card>
       `;
+  }
+  handlePopup(e: any, arg1: any) {
+    throw new Error("Method not implemented.");
   }
 }
 
