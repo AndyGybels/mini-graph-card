@@ -1,4 +1,4 @@
-import { html, LitElement } from "lit";
+import { html, LitElement, PropertyValues } from "lit";
 import {
   MiniGraphCardConfig,
   MiniGraphCardHomeAssistant,
@@ -9,6 +9,12 @@ import { provide } from "@lit/context";
 import { entityStoreContext } from "./stores/entityStoreContext";
 import { EntityStore } from "./stores/entityStore";
 import SparkMD5 from "spark-md5";
+import { isEntityObject } from "./guards";
+import { getMilli, getTime } from "./utils";
+import { ICONS, UPDATE_PROPS } from "./const";
+import { interpolateRgb } from "d3-interpolate";
+import { stateIcon } from "custom-card-helpers";
+import { HassEntity } from "home-assistant-js-websocket";
 
 // import { LitElement, html, svg } from "lit-element";
 // import localForage from "localforage/src/localforage";
@@ -874,14 +880,6 @@ import SparkMD5 from "spark-md5";
 //     );
 //   }
 
-//   computeName(index) {
-//     return (
-//       this.config.entities[index].name ||
-//       this.entity[index].attributes.friendly_name ||
-//       this.entity[index].entity_id
-//     );
-//   }
-
 //   computeIcon(entity) {
 //     return (
 //       this.config.icon ||
@@ -1317,6 +1315,28 @@ class MiniGraphCard extends LitElement {
 
   @provide({ context: entityStoreContext })
   entityStore!: EntityStore;
+  tooltip?: {
+    value: string;
+    count: number;
+    entity: any;
+    time: string[];
+    index: any;
+    label: null;
+  };
+
+  color?: string;
+
+  get configHash() {
+    return SparkMD5.hash(JSON.stringify(this._config));
+  }
+
+  get config() {
+    return this.entityStore.getConfig(this.configHash);
+  }
+
+  get firstEntity() {
+    return mapToEntityIds(this.config?.entities || [])[0];
+  }
 
   set hass(hass: MiniGraphCardHomeAssistant) {
     if (!hass.__entityStore__) {
@@ -1336,28 +1356,191 @@ class MiniGraphCard extends LitElement {
   async connectedCallback() {
     super.connectedCallback();
 
-    if (!this._hass || !this._config) {
-      throw new Error("Something went wrong");
+    if (this._hass && this._config) {
+      const subscribeResult = await this.entityStore.subscribe(
+        this._config!,
+        (e) => this.onEntityStateChange(e)
+      );
+
+      this._id = subscribeResult.configId;
     }
-
-    const subscribeResult = await this.entityStore.subscribe(
-      this._config!,
-      (e) => this.onEntityStateChange(e)
-    );
-
-    this._id = subscribeResult.configId;
   }
 
-  onEntityStateChange(entityId: string) {
-    const configHash = SparkMD5.hash(JSON.stringify(this._config));
+  // shouldUpdate(changedProps) {
+  //   if (UPDATE_PROPS.some((prop) => changedProps.has(prop))) {
+  //     this.color = this.computeColor(
+  //       this.tooltip.value !== undefined
+  //         ? this.tooltip.value
+  //         : this.getEntityState(0),
+  //       this.tooltip.entity || 0
+  //     );
+  //     return true;
+  //   }
+  // }
 
-    const newState = this.entityStore.getState(configHash, entityId);
-    console.log("newState", newState);
+  onEntityStateChange(entityId: string) {
     this.requestUpdate();
   }
 
+  computeName(index: number) {
+    const entity = this.config!.entities[index];
+
+    if (isEntityObject(entity)) {
+      return entity.name || entity.friendly_name || entity.entity_id;
+    }
+
+    return entity;
+  }
+
+  computeColor(inState: any, i: number) {
+    const { color_thresholds, line_color } = this.config!;
+
+    const state = Number(inState) || 0;
+
+    let intColor;
+    if (color_thresholds.length > 0) {
+      const { color } =
+        color_thresholds.find((ele: any) => ele.value < state) ||
+        color_thresholds.slice(-1)[0];
+      intColor = color;
+      const index = color_thresholds.findIndex((ele: any) => ele.value < state);
+      const c1 = color_thresholds[index];
+      const c2 = color_thresholds[index - 1];
+      if (c2) {
+        const factor = (c2.value - state) / (c2.value - c1.value);
+        intColor = interpolateRgb(c2.color, c1.color)(factor);
+      } else {
+        intColor = index
+          ? color_thresholds[color_thresholds.length - 1].color
+          : color_thresholds[0].color;
+      }
+    }
+
+    return isEntityObject(this.config!.entities[i])
+      ? this.config!.entities[i].color
+      : intColor || line_color[i] || line_color[0];
+  }
+
+  computeIcon(entity: HassEntity) {
+    return (
+      this.config!.icon ||
+      entity.attributes.icon ||
+      stateIcon(entity) ||
+      ICONS.temperature
+    );
+  }
+
+  getEndDate() {
+    const date = new Date();
+    switch (this.config!.group_by) {
+      case "date":
+        date.setDate(date.getDate() + 1);
+        date.setHours(0, 0, 0);
+        break;
+      case "hour":
+        date.setHours(date.getHours() + 1);
+        date.setMinutes(0, 0);
+        break;
+      default:
+        break;
+    }
+    return date;
+  }
+
+  renderIcon() {
+    if (this.config!.icon_image !== undefined) {
+      return html`
+        <div class="icon">
+          <img src="${this.config!.icon_image}" height="25" />
+        </div>
+      `;
+    }
+
+    const { icon, icon_adaptive_color } = this.config!.show;
+    const firstEntitiy = mapToEntityIds(this.config?.entities || [])[0];
+    const entity = this.entityStore.getState(this.configHash, firstEntitiy);
+
+    return icon
+      ? html`
+          <div
+            class="icon"
+            loc=${this.config!.align_icon}
+            style=${icon_adaptive_color ? `color: ${this.color};` : ""}
+          >
+            <ha-icon .icon=${this.computeIcon(entity)}></ha-icon>
+          </div>
+        `
+      : "";
+  }
+
+  setTooltip(entity: any, index: number, value: string, label = null) {
+    const { group_by, points_per_hour, hours_to_show, format } = this.config!;
+
+    // time units in milliseconds in this function
+    const interval = getMilli(1 / points_per_hour);
+    const n_points = Math.ceil(hours_to_show * points_per_hour);
+
+    // index is 0 (oldest) to n_points-1 (most recent ~= now)
+    // count of intervals from now to end of bin
+    // count is 0 (now) to n_points-1 (oldest)
+    const count = n_points - 1 - index;
+
+    // offset end by a minute, if grouped by, e.g., date or hour
+    const oneMinute = group_by !== "interval" ? 60000 : 0;
+
+    const now = this.getEndDate();
+
+    now.setMilliseconds(now.getMilliseconds() - oneMinute - interval * count);
+    const end = getTime(now, format, this._hass!.language);
+    now.setMilliseconds(now.getMilliseconds() + oneMinute - interval);
+    const start = getTime(now, format, this._hass!.language);
+
+    this.tooltip = {
+      value,
+      count,
+      entity,
+      time: [start, end],
+      index,
+      label,
+    };
+  }
+
+  renderName() {
+    if (!this.config!.show.name) return;
+    const name =
+      this.tooltip?.entity !== undefined
+        ? this.computeName(this.tooltip.entity)
+        : this.config!.name || this.computeName(0);
+
+    const color = this.config!.show.name_adaptive_color
+      ? `opacity: 1; color: ${this.color};`
+      : "";
+
+    return html`
+      <div class="name flex">
+        <span class="ellipsis" style=${color}>${name}</span>
+      </div>
+    `;
+  }
+
+  renderHeader() {
+    const { show, align_icon, align_header, font_size_header } = this.config!;
+
+    return show.name || (show.icon && align_icon !== "state")
+      ? html`
+          <div
+            class="header flex"
+            loc=${align_header}
+            style="font-size: ${font_size_header}px;"
+          >
+            ${this.renderName()}
+            ${align_icon !== "state" ? this.renderIcon() : ""}
+          </div>
+        `
+      : "No";
+  }
+
   render() {
-    console.log("render");
     const entityIds = mapToEntityIds(this._config?.entities ?? []);
 
     const configHash = SparkMD5.hash(JSON.stringify(this._config));
@@ -1366,7 +1549,7 @@ class MiniGraphCard extends LitElement {
     const config = this.entityStore.getConfig(configHash)!;
 
     console.log("config", config);
-
+    console.log(entity);
     if (entity)
       return html`
         <ha-card
@@ -1382,10 +1565,10 @@ class MiniGraphCard extends LitElement {
           @click=${(e) =>
             this.handlePopup(e, config.tap_action.entity || entity)}
         >
-          Now: ${entity.state}<br />
-          History: ${entity.history.length} points
+          ${this.renderHeader()}
         </ha-card>
       `;
+    else return html`Test`;
   }
   handlePopup(e: any, arg1: any) {
     throw new Error("Method not implemented.");

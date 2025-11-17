@@ -15,13 +15,28 @@ export type EntityConfig =
   | {
       entity: string;
       name?: string;
+      friendly_name?: string;
       show_state?: boolean;
+      entity_id: string;
+      color: string;
     };
 
 export type MiniGraphCardConfig = LovelaceCardConfig & {
   hours_to_show: number;
   smoothing: boolean;
   entities: EntityConfig[];
+  font_size_header: string;
+  show: {
+    labels_secondary: string;
+    labels: string;
+    points: string;
+    fill: boolean;
+    name: string;
+    icon: string;
+    icon_adaptive_color: string;
+    name_adaptive_color: string;
+    graph: boolean;
+  };
 };
 
 export interface ColorThreshold {

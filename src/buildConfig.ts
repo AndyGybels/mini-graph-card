@@ -10,6 +10,7 @@ import {
   ColorThreshold,
   ColorThresholdInput,
   EntityConfig,
+  MiniGraphCardConfig,
   StateMapItem,
   TypeOfTransition,
 } from "./types";
@@ -150,7 +151,7 @@ const computeThresholds = (
  * @throws Error if entities are not provided as an array
  * @throws Error if deprecated line_color_above/below options are used
  */
-export default (config: LovelaceCardConfig): LovelaceCardConfig => {
+export default (config: LovelaceCardConfig): MiniGraphCardConfig => {
   if (!Array.isArray(config.entities))
     throw new Error(
       `Please provide the "entities" option as a list.\n See ${URL_DOCS}`
@@ -160,7 +161,7 @@ export default (config: LovelaceCardConfig): LovelaceCardConfig => {
       `"line_color_above/line_color_below" was removed, please use "color_thresholds".\n See ${URL_DOCS}`
     );
 
-  const conf: LovelaceCardConfig = {
+  const conf: MiniGraphCardConfig = {
     animate: false,
     hour24: false,
     font_size: FONT_SIZE,

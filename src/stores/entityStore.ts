@@ -14,7 +14,7 @@ export class EntityStore {
   // configHash → Set<callbacks>
   private configSubscribers = new Map<string, Set<ConfigCallback>>();
 
-  private configMap = new Map<string, LovelaceCardConfig>();
+  private configMap = new Map<string, MiniGraphCardConfig>();
 
   // entityId → Set<configHashes>
   private entityToConfigs = new Map<string, Set<string>>();
@@ -186,6 +186,17 @@ export class EntityStore {
   // Per-config + per-entity state + history lookup
   // -------------------------------------------------------------------
   getState(configId: string, entityId: string) {
+    const haState = this.states.get(entityId) ?? this.hass.states[entityId];
+
+    const history = this.histories.get(configId)?.get(entityId) ?? [];
+
+    return {
+      ...haState,
+      history,
+    };
+  }
+
+  getFirstEntity(configId: string, entityId: string) {
     const haState = this.states.get(entityId) ?? this.hass.states[entityId];
 
     const history = this.histories.get(configId)?.get(entityId) ?? [];
