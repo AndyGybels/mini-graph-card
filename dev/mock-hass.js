@@ -35,6 +35,100 @@ function generateHistory(entityId, hours = 24, interval = 5) {
 class MockConnection {
   constructor() {
     this.eventListeners = new Map();
+    this.connectionListeners = new Map(); // ready / disconnected / reconnect-error
+    this.historyCache = new Map();
+
+    // Update history data every 2 seconds for faster visible changes
+    setInterval(() => {
+      this.updateHistory();
+    }, 2000);
+  }
+
+  updateHistory() {
+    // Add new data points to existing history
+    const now = Date.now();
+
+    this.historyCache.forEach((historyArray, entityId) => {
+      if (!Array.isArray(historyArray) || historyArray.length === 0) return;
+
+      let value;
+
+      // Generate new value based on entity type with larger variations
+      if (entityId.includes("temperature")) {
+        // More dramatic temperature changes: 15-28°C
+        value = (
+          20 +
+          8 * Math.sin(Date.now() / 10000) +
+          Math.random() * 3
+        ).toFixed(1);
+      } else if (entityId.includes("humidity")) {
+        // More dramatic humidity changes: 30-80%
+        value = (
+          55 +
+          25 * Math.cos(Date.now() / 8000) +
+          Math.random() * 10
+        ).toFixed(0);
+      } else if (entityId.includes("consumption")) {
+        // Steadily increasing consumption with spikes
+        const lastValue = parseFloat(historyArray[historyArray.length - 1].s);
+        const spike = Math.random() > 0.7 ? Math.random() * 2 : 0;
+        value = (lastValue + 0.1 + spike).toFixed(2);
+      } else {
+        value = (50 + 40 * Math.sin(Date.now() / 5000)).toFixed(1);
+      }
+
+      // Add new point
+      historyArray.push({
+        s: value.toString(),
+        a: {},
+        lu: now / 1000,
+      });
+
+      // Keep only last 24 hours of data (288 points at 5 min intervals)
+      if (historyArray.length > 288) {
+        historyArray.shift();
+      }
+
+      // Reflect the new value on the state object and notify listeners
+      // with fresh timestamps, like the real state_changed event would.
+      const state = window.hass.states[entityId];
+      if (state) {
+        const newState = {
+          ...state,
+          state: value.toString(),
+          last_changed: new Date(now).toISOString(),
+          last_updated: new Date(now).toISOString(),
+        };
+        window.hass.states[entityId] = newState;
+
+        const stateListeners = this.eventListeners.get("state_changed");
+        if (stateListeners) {
+          stateListeners.forEach((callback) => {
+            callback({
+              data: {
+                entity_id: entityId,
+                new_state: newState,
+              },
+            });
+          });
+        }
+      }
+    });
+  }
+
+  // Connection lifecycle listeners, like home-assistant-js-websocket
+  addEventListener(eventType, callback) {
+    if (!this.connectionListeners.has(eventType)) {
+      this.connectionListeners.set(eventType, []);
+    }
+    this.connectionListeners.get(eventType).push(callback);
+  }
+
+  removeEventListener(eventType, callback) {
+    const listeners = this.connectionListeners.get(eventType);
+    if (!listeners) return;
+    const index = listeners.indexOf(callback);
+    if (index > -1) listeners.splice(index, 1);
   }
 
   async subscribeEvents(callback, eventType) {
@@ -96,13 +190,22 @@ class MockConnection {
   }
 
   async sendMessagePromise(message) {
+    // simulate a real recorder: history queries take time
+    await new Promise((resolve) => setTimeout(resolve, 800));
     if (message.type === "history/history_during_period") {
       const entityIds = message.entity_ids || [];
       const hours =
         (new Date(message.end_time) - new Date(message.start_time)) /
         (1000 * 60 * 60);
 
-      return entityIds.map((entityId) => generateHistory(entityId, hours));
+      // Real HA keys the response by entity id
+      const result = {};
+      entityIds.forEach((entityId) => {
+        const history = generateHistory(entityId, hours);
+        this.historyCache.set(entityId, history);
+        result[entityId] = history;
+      });
+      return result;
     }
     return null;
   }

@@ -28,7 +28,7 @@
     <div id="container" class="container"></div>
 
     <script type="module" src="/mock-hass.js"></script>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/index.ts"></script>
     <script type="module">
       // Wait for the custom element to be defined
 
@@ -53,6 +53,16 @@
       });
 
       container.appendChild(card);
+
+      // measure time-to-first-graph-paint (readable as window.__mgcFirstPaint)
+      const paintPoll = setInterval(() => {
+        const graph = card.shadowRoot?.querySelector("mini-graph-card-graph");
+        if (graph?.shadowRoot?.querySelector("path.line")) {
+          window.__mgcFirstPaint = Math.round(performance.now());
+          console.info(`graph first painted at ${window.__mgcFirstPaint}ms`);
+          clearInterval(paintPoll);
+        }
+      }, 16);
     </script>
   </body>
 </html>

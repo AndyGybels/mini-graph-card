@@ -1,8 +1,12 @@
 import { defineConfig } from "vite";
 import { resolve } from "path";
+import minifyLiterals from "rollup-plugin-minify-template-literals";
 
 export default defineConfig(({ mode }) => ({
   root: mode === "development" ? "dev" : undefined,
+  // minify the CSS/HTML *inside* lit tagged template literals — esbuild
+  // can't touch string contents, so this runs as a separate build step
+  plugins: mode === "production" ? [minifyLiterals()] : [],
   resolve: {
     alias: {
       "~": resolve(__dirname, "./src"),
@@ -14,7 +18,7 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     lib: {
-      entry: resolve(__dirname, "src/main.ts"),
+      entry: resolve(__dirname, "src/index.ts"),
       name: "MiniGraphCard",
       formats: ["iife"],
       fileName: () => "mini-graph-card-bundle.js",

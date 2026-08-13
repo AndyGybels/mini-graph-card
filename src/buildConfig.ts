@@ -14,13 +14,27 @@ import {
   StateMapItem,
   TypeOfTransition,
 } from "./types";
-import {
-  isColorThresholdString,
-  isEntityString,
-  isStateMapString,
-  isString,
-} from "./guards";
+import { log } from "./utils";
 import { LovelaceCardConfig } from "home-assistant-frontend-types";
+
+// ---------------------------------------------------------------------
+// Type guards for the raw (untrusted) user configuration
+// ---------------------------------------------------------------------
+const isString = (value: unknown): value is string =>
+  typeof value === "string";
+
+const isEntityString = (entity: string | EntityConfig): entity is string =>
+  typeof entity === "string";
+
+const isEntityObject = (x: string | EntityConfig): x is EntityConfig =>
+  typeof x === "object" && x !== null && "entity" in x;
+
+const isStateMapString = (state: string | StateMapItem): state is string =>
+  typeof state === "string";
+
+const isColorThresholdString = (
+  threshold: string | ColorThresholdInput
+): threshold is string => typeof threshold === "string";
 
 /**
  * Finds the next array element with a defined "value" property, starting from the given index.
@@ -184,16 +198,19 @@ export default (config: LovelaceCardConfig): MiniGraphCardConfig => {
     tap_action: {
       action: "more-info",
     },
+    format: {},
     ...JSON.parse(JSON.stringify(config)),
     show: { ...DEFAULT_SHOW, ...config.show },
   };
 
-  // Normalize entity configurations
-  conf.entities.forEach((entity: string | EntityConfig, i: number) => {
-    if (isEntityString(entity)) {
-      conf.entities[i] = { entity };
-    }
-  });
+  // Normalize entity configurations: strings become objects, and every
+  // entity records its index (required for filtered views and legends)
+  conf.entities = conf.entities.map(
+    (entity: string | EntityConfig, i: number): EntityConfig => ({
+      ...(isEntityObject(entity) ? entity : { entity }),
+      index: i,
+    })
+  );
 
   // Normalize state map configurations
   conf.state_map.forEach((state: string | StateMapItem, i: number) => {
@@ -218,9 +235,11 @@ export default (config: LovelaceCardConfig): MiniGraphCardConfig => {
   );
 
   // Configure date/time formatting based on settings
-  const additional =
+  const additional: Intl.DateTimeFormatOptions =
     conf.hours_to_show > 24 ? { day: "numeric", weekday: "short" } : {};
-  const hourFormat = conf.hour24 ? { hourCycle: "h23" } : { hour12: true };
+  const hourFormat: Intl.DateTimeFormatOptions = conf.hour24
+    ? { hourCycle: "h23" }
+    : { hour12: true };
   conf.format = { ...hourFormat, ...additional };
 
   // Adjust points_per_hour based on grouping interval
@@ -240,9 +259,7 @@ export default (config: LovelaceCardConfig): MiniGraphCardConfig => {
     const entities = conf.entities.length;
     if (conf.hours_to_show * conf.points_per_hour * entities > MAX_BARS) {
       conf.points_per_hour = MAX_BARS / (conf.hours_to_show * entities);
-      console.log(
-        `Not enough space, adjusting points_per_hour to ${conf.points_per_hour}`
-      );
+      log(`Not enough space, adjusting points_per_hour to ${conf.points_per_hour}`);
     }
   }
 
